@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/grailbio/base/errors"
+	"github.com/grailbio/base/log"
 
 	_ "github.com/grailbio/v23/factories/grail"
 	v23 "v.io/v23"
@@ -90,18 +91,16 @@ a '[server]:ec2:619867110810:role:adhoc:i-0aec7b085f8432699' blessing where
 }
 
 func run(*cmdline.Env, []string) error {
-	ctx, shutDown := v23.Init()
-	defer shutDown()
-
 	if _, ok := os.LookupEnv(ref.EnvCredentials); !ok {
 		fmt.Print("*******************************************************\n")
 		fmt.Printf("*    WARNING: $%s is not defined!        *\n", ref.EnvCredentials)
 		fmt.Printf("*******************************************************\n\n")
 		fmt.Printf("How to fix this in bash: export %s=%s\n\n", ref.EnvCredentials, credentialsDirFlag)
 	}
+
 	principal, err := agentlib.LoadPrincipal(credentialsDirFlag)
-	if err != nil && os.IsNotExist(err) {
-		fmt.Printf("INFO: Creating new principal at: %s", credentialsDirFlag)
+	if err != nil {
+		log.Printf("INFO: Couldn't load principal from %s. Creating new one...", credentialsDirFlag)
 		// TODO(josh): Do we need to kill the v23agentd?
 		_, err = libsecurity.CreatePersistentPrincipal(credentialsDirFlag, nil)
 		if err != nil {
@@ -119,10 +118,13 @@ func run(*cmdline.Env, []string) error {
 		return nil
 	}
 
+	ctx, shutDown := v23.Init()
+	defer shutDown()
 	ctx, err = v23.WithPrincipal(ctx, principal)
 	if err != nil {
-		return errors.E("failed to set context principal", err)
+		return errors.E("failed to initialize context", err)
 	}
+
 	var blessings security.Blessings
 	if ec2Flag {
 		blessings, err = fetchEC2Blessings(ctx)
