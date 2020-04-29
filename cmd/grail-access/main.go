@@ -7,10 +7,11 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/grailbio/base/must"
 
 	_ "github.com/grailbio/v23/factories/grail"
 	v23 "v.io/v23"
@@ -18,7 +19,6 @@ import (
 	"v.io/v23/security"
 	"v.io/x/lib/cmdline"
 	"v.io/x/ref"
-	"v.io/x/ref/lib/v23cmd"
 	"v.io/x/ref/services/agent/agentlib"
 )
 
@@ -46,9 +46,19 @@ var (
 	doNotRefreshDurationFlag time.Duration
 )
 
-func newCmdRoot() *cmdline.Command {
+func main() {
+	// Prevent the v23agentd from running. TODO(josh): Why?
+	must.Nil(os.Setenv(ref.EnvCredentialsNoAgent, "1"))
+
+	var defaultCredentialsDir string
+	if dir, ok := os.LookupEnv(ref.EnvCredentials); ok {
+		defaultCredentialsDir = dir
+	} else {
+		defaultCredentialsDir = os.ExpandEnv("${HOME}/.v23")
+	}
+
 	cmd := &cmdline.Command{
-		Runner: v23cmd.RunnerFunc(run),
+		Runner: cmdline.RunnerFunc(run),
 		Name:   "grail-access",
 		Short:  "Creates fresh Vanadium credentials",
 		Long: `
@@ -72,20 +82,22 @@ a '[server]:ec2:619867110810:role:adhoc:i-0aec7b085f8432699' blessing where
 	}
 	cmd.Flags.StringVar(&blesserGoogleFlag, "blesser-google", "/ticket-server.eng.grail.com:8102/blesser/google", "Blesser to talk to for the Google-based flow.")
 	cmd.Flags.StringVar(&blesserEc2Flag, "blesser-ec2", "/ticket-server.eng.grail.com:8102/blesser/ec2", "Blesser to talk to for the EC2-based flow.")
-	cmd.Flags.StringVar(&credentialsDirFlag, "dir", os.ExpandEnv("${HOME}/.v23"), "Where to store the Vanadium credentials. NOTE: the content will be erased if the credentials are regenerated.")
+	cmd.Flags.StringVar(&credentialsDirFlag, "dir", defaultCredentialsDir, "Where to store the Vanadium credentials. NOTE: the content will be erased if the credentials are regenerated.")
 	cmd.Flags.BoolVar(&ec2Flag, "ec2", false, "Use the role of the EC2 VM.")
 	cmd.Flags.BoolVar(&browserFlag, "browser", os.Getenv("SSH_CLIENT") == "", "Attempt to open a browser.")
 	cmd.Flags.BoolVar(&dumpFlag, "dump", false, "If credentials are present, dump them on the console instead of refreshing them.")
 	cmd.Flags.DurationVar(&doNotRefreshDurationFlag, "do-not-refresh-duration", 7*24*time.Hour, "Do not refresh credentials if they are present and do not expire within this duration.")
-	return cmd
+
+	cmdline.HideGlobalFlagsExcept()
+	cmdline.Main(cmd)
 }
 
-func run(ctx *v23context.T, env *cmdline.Env, args []string) error {
+func run(*cmdline.Env, []string) error {
 	if _, ok := os.LookupEnv(ref.EnvCredentials); !ok {
-		fmt.Printf("*******************************************************\n")
-		fmt.Printf("*    WARNING: $V23_CREDENTIALS is not defined!        *\n")
+		fmt.Print("*******************************************************\n")
+		fmt.Printf("*    WARNING: $%s is not defined!        *\n", ref.EnvCredentials)
 		fmt.Printf("*******************************************************\n\n")
-		fmt.Printf("How to fix this in bash: export V23_CREDENTIALS=%s\n\n", credentialsDirFlag)
+		fmt.Printf("How to fix this in bash: export %s=%s\n\n", ref.EnvCredentials, credentialsDirFlag)
 	}
 	agentPrincipal, err := agentlib.LoadPrincipal(credentialsDirFlag)
 	if err == nil {
@@ -138,18 +150,4 @@ func dump(ctx *v23context.T) {
 
 	blessing, _ := principal.BlessingStore().Default()
 	fmt.Printf("Expires on %s (in %s)\n", blessing.Expiry().Local(), time.Until(blessing.Expiry()))
-}
-
-func main() {
-	// We disable this flag because it's initialized with the value of the
-	// V23_CREDENTIALS environmental variable and that directory might be empty.
-	if err := flag.Set("v23.credentials", ""); err != nil {
-		panic(err)
-	}
-	// Prevent the v23agentd from running.
-	if err := os.Setenv(ref.EnvCredentialsNoAgent, "1"); err != nil {
-		panic(err)
-	}
-	cmdline.HideGlobalFlagsExcept()
-	cmdline.Main(newCmdRoot())
 }
