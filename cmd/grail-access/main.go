@@ -11,14 +11,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/grailbio/base/must"
+	"github.com/grailbio/base/errors"
 
 	_ "github.com/grailbio/v23/factories/grail"
 	v23 "v.io/v23"
-	v23context "v.io/v23/context"
 	"v.io/v23/security"
 	"v.io/x/lib/cmdline"
 	"v.io/x/ref"
+	libsecurity "v.io/x/ref/lib/security"
 	"v.io/x/ref/services/agent/agentlib"
 )
 
@@ -47,9 +47,6 @@ var (
 )
 
 func main() {
-	// Prevent the v23agentd from running. TODO(josh): Why?
-	must.Nil(os.Setenv(ref.EnvCredentialsNoAgent, "1"))
-
 	var defaultCredentialsDir string
 	if dir, ok := os.LookupEnv(ref.EnvCredentials); ok {
 		defaultCredentialsDir = dir
@@ -93,55 +90,71 @@ a '[server]:ec2:619867110810:role:adhoc:i-0aec7b085f8432699' blessing where
 }
 
 func run(*cmdline.Env, []string) error {
+	ctx, shutDown := v23.Init()
+	defer shutDown()
+
 	if _, ok := os.LookupEnv(ref.EnvCredentials); !ok {
 		fmt.Print("*******************************************************\n")
 		fmt.Printf("*    WARNING: $%s is not defined!        *\n", ref.EnvCredentials)
 		fmt.Printf("*******************************************************\n\n")
 		fmt.Printf("How to fix this in bash: export %s=%s\n\n", ref.EnvCredentials, credentialsDirFlag)
 	}
-	agentPrincipal, err := agentlib.LoadPrincipal(credentialsDirFlag)
-	if err == nil {
-		// We have access to some credentials so we'll try to load them.
-		ctx, err = v23.WithPrincipal(ctx, agentPrincipal)
+	principal, err := agentlib.LoadPrincipal(credentialsDirFlag)
+	if err != nil && os.IsNotExist(err) {
+		fmt.Printf("INFO: Creating new principal at: %s", credentialsDirFlag)
+		// TODO(josh): Do we need to kill the v23agentd?
+		_, err = libsecurity.CreatePersistentPrincipal(credentialsDirFlag, nil)
 		if err != nil {
-			return err
+			return errors.E("failed to create new principal", err)
 		}
-		agentBlessings, _ := agentPrincipal.BlessingStore().Default()
-		if !agentBlessings.IsZero() {
-			principal := v23.GetPrincipal(ctx)
-			if err := principal.BlessingStore().SetDefault(agentBlessings); err != nil {
-				return err
-			}
-			if err := security.AddToRoots(principal, agentBlessings); err != nil {
-				return err
-			}
-		}
-	} else {
-		// We don't have access to credentials. Typically this happen on the first
-		// run when the credentials directory is empty.
-
-		// Dumping current credentials does not make sense when credentials are absent.
-		if dumpFlag {
-			fmt.Printf("Credentials not found in %s\n", credentialsDirFlag)
-			return nil
-		}
+		principal, err = agentlib.LoadPrincipal(credentialsDirFlag)
+	}
+	if err != nil {
+		return errors.E("failed to load principal", err)
 	}
 
-	b, _ := v23.GetPrincipal(ctx).BlessingStore().Default()
-
-	if dumpFlag || b.Expiry().After(time.Now().Add(doNotRefreshDurationFlag)) {
-		dump(ctx)
+	defaultBlessings, _ := principal.BlessingStore().Default()
+	if dumpFlag || defaultBlessings.Expiry().After(time.Now().Add(doNotRefreshDurationFlag)) {
+		dump(principal)
 		return nil
 	}
-	if ec2Flag {
-		return runEc2(ctx)
+
+	ctx, err = v23.WithPrincipal(ctx, principal)
+	if err != nil {
+		return errors.E("failed to set context principal", err)
 	}
-	return runGoogle(ctx)
+	var blessings security.Blessings
+	if ec2Flag {
+		blessings, err = fetchEC2Blessings(ctx)
+	} else {
+		blessings, err = fetchGoogleBlessings(ctx)
+	}
+	if err != nil {
+		return errors.E("failed to fetch blessings", err)
+	}
+
+	if err := principal.BlessingStore().SetDefault(blessings); err != nil {
+		return errors.E(err, "failed to set default blessings")
+	}
+	_, err = principal.BlessingStore().Set(blessings, "...") // TODO(josh): What is this?
+	if err != nil {
+		return errors.E(err, "failed to set peer blessings")
+	}
+	if err := security.AddToRoots(principal, blessings); err != nil {
+		return errors.E(err, "failed to add blessing roots")
+	}
+
+	fmt.Println("Successfully applied new blessing:")
+	dump(principal)
+
+	if err := principal.Close(); err != nil {
+		errors.E("failed to close agent principal", err)
+	}
+	return nil
 }
 
-func dump(ctx *v23context.T) {
-	// Mimic the principal dump output.
-	principal := v23.GetPrincipal(ctx)
+func dump(principal security.Principal) {
+	// Mimic the output of the v.io/x/ref/cmd/principal dump command.
 	fmt.Printf("Public key: %s\n", principal.PublicKey())
 	fmt.Println("---------------- BlessingStore ----------------")
 	fmt.Print(principal.BlessingStore().DebugString())
